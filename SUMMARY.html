@@ -2,14 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Flaky Network: Architecture Summary</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; max-width: 800px; margin: 0 auto; padding: 20px; }
-        h1, h2, h3 { color: #2c3e50; }
-        code { background: #f4f4f4; padding: 2px 5px; border-radius: 4px; font-family: monospace; }
-        .highlight { background: #e8f4f8; border-left: 4px solid #3498db; padding: 15px; margin: 20px 0; }
-    </style>
 </head>
 <body>
     <h1>Flaky Network: Architecture Summary</h1>
@@ -21,33 +14,31 @@
         <li><strong>ARQ (Automatic Repeat reQuest):</strong> The receiver asks the sender to resend lost packets.</li>
         <li><strong>FEC (Forward Error Correction):</strong> The sender proactively sends redundant data.</li>
     </ul>
-    <p>Because the network simulates high delay, ARQ is unviable. The Round-Trip Time (RTT) required to detect a loss, request a resend, and receive the duplicate takes roughly <code>2 * delay_max_ms</code>. By the time the recovery packet arrives, it is guaranteed to miss its strict playout deadline. Therefore, a pure FEC approach is mathematically required to succeed.</p>
+    <p>Because the network simulates high delay, ARQ is unviable. The Round-Trip Time (RTT) required to detect a loss, request a resend, and receive the duplicate takes roughly 2 * delay_max_ms. By the time the recovery packet arrives, it is guaranteed to miss its strict playout deadline. Therefore, a pure FEC approach is mathematically required to succeed.</p>
 
     <h2>2. Wire Protocol Optimization</h2>
-    <p>The assignment enforces a hard bandwidth cap: we cannot transmit more than <code>2.0x</code> the baseline bytes. The standard harness frame is 164 bytes (4 bytes for sequence, 160 bytes payload). 164 bytes gives an initial overhead of 1.025x.</p>
+    <p>The assignment enforces a hard bandwidth cap: we cannot transmit more than 2.0x the baseline bytes. The standard harness frame is 164 bytes (4 bytes for sequence, 160 bytes payload). 164 bytes gives an initial overhead of 1.025x.</p>
     <p>To maximize our available budget for redundant data, we implemented a custom wire protocol between our Sender and Receiver:</p>
-    <div class="highlight">
-        <strong>Custom Wire Format:</strong> We downcast the 32-bit sequence number into a 16-bit unsigned integer using <code>htons()</code>. The resulting packet is <strong>162 bytes</strong> (2 bytes seq + 160 bytes payload). This saves 2 bytes per frame, lowering our baseline overhead and providing vital headroom for our FEC strategy.
-    </div>
+    <p><strong>Custom Wire Format:</strong> We downcast the 32-bit sequence number into a 16-bit unsigned integer using htons(). The resulting packet is <strong>162 bytes</strong> (2 bytes seq + 160 bytes payload). This saves 2 bytes per frame, lowering our baseline overhead and providing vital headroom for our FEC strategy.</p>
 
     <h2>3. Forward Error Correction (FEC) Strategy</h2>
     <p>With an optimized packet size, our budget permits us to transmit up to 320 bytes per frame on average. The primary decision is <em>when</em> to send this redundant data:</p>
     <ul>
-        <li><strong>Piggybacking (N-1):</strong> Appending frame <code>i-1</code> onto frame <code>i</code>. This survives burst losses but forces a mandatory 20ms delay penalty, as frame <code>i-1</code> cannot be recovered until frame <code>i</code> arrives.</li>
-        <li><strong>Immediate Duplication:</strong> Sending two copies of frame <code>i</code> at the exact same time. This survives random independent drops and incurs <strong>zero ms</strong> of artificial delay penalty.</li>
+        <li><strong>Piggybacking (N-1):</strong> Appending frame i-1 onto frame i. This survives burst losses but forces a mandatory 20ms delay penalty, as frame i-1 cannot be recovered until frame i arrives.</li>
+        <li><strong>Immediate Duplication:</strong> Sending two copies of frame i at the exact same time. This survives random independent drops and incurs <strong>zero ms</strong> of artificial delay penalty.</li>
     </ul>
     <h3>The Implementation: 95% Immediate Duplication</h3>
-    <p>Since the scoring mechanism heavily rewards minimizing <code>DELAY_MS</code>, we optimized entirely for the lowest possible delay by utilizing Immediate Duplication.</p>
-    <p>The Sender executes <code>sendto()</code> with the current frame. Then, for exactly 95% of frames (calculated via <code>seq % 20 != 0</code>), it instantly executes a second <code>sendto()</code> with the identical packet. This achieves a highly robust defense against random packet drops while finalizing the bandwidth overhead at exactly <strong>1.97x</strong>.</p>
+    <p>Since the scoring mechanism heavily rewards minimizing DELAY_MS, we optimized entirely for the lowest possible delay by utilizing Immediate Duplication.</p>
+    <p>The Sender executes sendto() with the current frame. Then, for exactly 95% of frames (calculated via seq % 20 != 0), it instantly executes a second sendto() with the identical packet. This achieves a highly robust defense against random packet drops while finalizing the bandwidth overhead at exactly <strong>1.97x</strong>.</p>
 
     <h2>4. Zero-Delay Jitter Buffer</h2>
-    <p>A traditional jitter buffer delays all incoming packets to a high-water mark, playing them out on a steady clock to hide network jitter. However, analyzing the assignment's harness (<code>endpoints.py</code>) revealed a critical behavior: the player thread judges frames retrospectively based on their first arrival time. Early arrivals are completely valid and optimally minimize the perceived delay.</p>
-    <p>Therefore, we engineered a <strong>Zero-Delay Jitter Buffer</strong> in <code>receiver.c</code>:</p>
+    <p>A traditional jitter buffer delays all incoming packets to a high-water mark, playing them out on a steady clock to hide network jitter. However, analyzing the assignment's harness (endpoints.py) revealed a critical behavior: the player thread judges frames retrospectively based on their first arrival time. Early arrivals are completely valid and optimally minimize the perceived delay.</p>
+    <p>Therefore, we engineered a <strong>Zero-Delay Jitter Buffer</strong> in receiver.c:</p>
     <ul>
-        <li>It allocates a fast boolean state array (<code>char delivered[100000] = {0}</code>) to perform O(1) deduplication.</li>
-        <li>As soon as a packet arrives, the receiver converts the 16-bit sequence number back to 32-bit network byte order (<code>htonl()</code>).</li>
-        <li>If the packet hasn't been delivered yet, it immediately fires <code>sendto()</code> to the player.</li>
+        <li>It allocates a fast boolean state array (char delivered[100000] = {0}) to perform O(1) deduplication.</li>
+        <li>As soon as a packet arrives, the receiver converts the 16-bit sequence number back to 32-bit network byte order (htonl()).</li>
+        <li>If the packet hasn't been delivered yet, it immediately fires sendto() to the player.</li>
     </ul>
-    <p>This allows us to push the graded <code>DELAY_MS</code> down to the exact absolute physical limit of the network's maximum natural delay.</p>
+    <p>This allows us to push the graded DELAY_MS down to the exact absolute physical limit of the network's maximum natural delay.</p>
 </body>
 </html>
